@@ -1,29 +1,19 @@
 {
   "name": "fix-vietnamese-kiro-cli",
-  "version": "1.0.0",
+  "version": "4.0.0",
   "description": "Fix Vietnamese IME (Unikey/EVKey/OpenKey) typing issues in Kiro CLI TUI mode",
   "main": "patch-cli-kiro.js",
   "bin": {
     "fix-vietnamese-kiro-cli": "patch-cli-kiro.js"
   },
   "scripts": {
-    "start": "node patch-cli-kiro.js",
     "patch": "node patch-cli-kiro.js",
     "restore": "node patch-cli-kiro.js --restore",
     "dry-run": "node patch-cli-kiro.js --dry-run"
   },
   "keywords": [
-    "kiro",
-    "kiro-cli",
-    "vietnamese",
-    "ime",
-    "unikey",
-    "evkey",
-    "openkey",
-    "telex",
-    "fix",
-    "patch",
-    "tieng-viet"
+    "kiro", "kiro-cli", "vietnamese", "ime", "unikey", "evkey",
+    "openkey", "telex", "vni", "fix", "patch", "tieng-viet"
   ],
   "author": "d-init-d",
   "license": "MIT",
@@ -41,7 +31,6 @@
   "files": [
     "patch-cli-kiro.js",
     "README.md",
-    "LICENSE",
-    "CHANGELOG.md"
+    "LICENSE"
   ]
 }
