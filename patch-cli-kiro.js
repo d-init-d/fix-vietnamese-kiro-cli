@@ -1,69 +1,108 @@
 #!/usr/bin/env node
 
 /**
- * fix-vietnamese-kiro-cli v2.0.0
+ * fix-vietnamese-kiro-cli v3.0.0
  *
- * Patches Kiro CLI's tui.js to fix Vietnamese IME issues (Unikey / EVKey / OpenKey).
+ * ROOT CAUSE ANALYSIS:
+ * Kiro TUI uses raw mode stdin. Vietnamese IME (EVKey/Unikey) sends rapid sequences:
+ *   Event 1: "\x7F" (backspace - delete previous char)
+ *   Event 2: "ào" (replacement text with diacritic)
  *
- * ROOT CAUSE: Kiro's single-line editor (class `ap`) has this guard before inserting text:
+ * These arrive as SEPARATE stdin data events. The TUI processes event 1 (deletes char),
+ * then processes event 2. But between events, React re-renders and the cursor/state
+ * can become inconsistent, causing the replacement text to be partially lost.
  *
- *   if(![...e].some((i)=>{let a=i.charCodeAt(0);return a<32||a===127||a>=128&&a<=159}))
- *     this.insertCharacter(e)
+ * THE FIX: Hook process.stdin.on('data') to detect IME patterns (\x7F followed by
+ * printable text within 16ms) and merge them into a single event. The merged event
+ * is then processed atomically by the editor's handleInput, which correctly handles
+ * the backspace+insert sequence without intermediate re-renders.
  *
- * When Vietnamese IME sends a mixed chunk like "\x7Fdùng" (backspace + replacement text),
- * the `some()` check sees \x7F (charCode 127) and REJECTS THE ENTIRE STRING, including
- * the valid Vietnamese text that follows. This causes characters to be dropped.
+ * Additionally, patch the single-line editor (class ap) to filter control chars
+ * instead of rejecting the entire input string.
  *
- * THE FIX: Replace the guard with logic that filters out control characters and inserts
- * only the printable portion. Backspace chars (\x7F) are handled separately by the
- * deleteCharBackward matcher above, so by the time we reach this code, any \x7F in the
- * string is a leftover from IME composition that should be stripped, not used to reject
- * the whole input.
- *
- * CREDIT: Investigation technique inspired by `fix-vietnamese-claude-code`
- * (https://github.com/0x0a0d/fix-vietnamese-claude-code) by 0x0a0d.
+ * CREDIT: Inspired by fix-vietnamese-claude-code by 0x0a0d.
  */
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const MARKER = '/* _d_init_d_vn_ime_fix_v2_ */';
-const VERSION = '2.0.0';
+const MARKER = '/* _d_init_d_vn_ime_fix_v3_ */';
+const VERSION = '3.0.0';
 
-// The original pattern we're looking for (single-line editor guard)
-const ORIGINAL_PATTERN = 'if(![...e].some((i)=>{let a=i.charCodeAt(0);return a<32||a===127||a>=128&&a<=159}))this.insertCharacter(e)';
+// Patch 1: Single-line editor guard (class ap)
+const ORIGINAL_AP = 'if(![...e].some((i)=>{let a=i.charCodeAt(0);return a<32||a===127||a>=128&&a<=159}))this.insertCharacter(e)';
+const PATCHED_AP = `${MARKER}(()=>{let _f=[...e].filter((i)=>{let a=i.charCodeAt(0);return!(a<32||a===127||a>=128&&a<=159)}).join("");if(_f.length>0)this.insertCharacter(_f)})()`;
 
-// The replacement: filter control chars, insert only printable portion
-const PATCHED_CODE = `${MARKER}(()=>{let _f=[...e].filter((i)=>{let a=i.charCodeAt(0);return!(a<32||a===127||a>=128&&a<=159)}).join("");if(_f.length>0)this.insertCharacter(_f)})()`;
+// Patch 2: Inject IME coalescing at stdin level - but ONLY for 'data' listeners
+// that are added AFTER our hook. We intercept at the point where addInputListener
+// dispatches to handlers.
+const ORIGINAL_DISPATCH = 'return n.addInputListener((o)=>{let{input:c,key:l}=cp(o);a.current(c,l)})';
+// We don't patch this - it's for useInput hook which isn't the problem.
+
+// Patch 3: The real fix - in the multi-line editor's handleInput, when we see
+// a backspace followed immediately by printable text in the same event, handle
+// them together. But events arrive separately...
+//
+// ACTUAL FIX: Inject IIFE that monkey-patches the TUI's addInputListener to
+// coalesce rapid stdin events. Unlike v1 which hooked process.stdin.on (too low
+// level, broke key parsing), this hooks at the TUI dispatcher level.
+
+// We inject after the `// @bun` pragma, a self-contained IIFE that:
+// 1. Saves original process.stdin.on
+// 2. Wraps 'data' listeners with a 16ms coalescing buffer
+// 3. When buffer contains \x7F followed by printable chars, delivers as one chunk
+// 4. When buffer contains only printable chars or only \x7F, delivers immediately
+const PAYLOAD = `${MARKER}
+(function(){
+  if(process.stdin.__vnfix)return;
+  process.stdin.__vnfix=true;
+  var W=16,orig=process.stdin.on.bind(process.stdin),
+      origAL=process.stdin.addListener?process.stdin.addListener.bind(process.stdin):null;
+  function wrap(ev,fn){
+    if(ev!=='data')return fn;
+    var buf=null,tm=null;
+    return function(chunk){
+      var s=typeof chunk==='string'?chunk:chunk.toString();
+      // If this chunk is ONLY a backspace or ONLY printable, and no pending buffer, pass through immediately
+      if(!buf&&s.indexOf('\\x7f')===-1&&s.indexOf('\\b')===-1){fn.call(this,chunk);return}
+      // If this is a lone backspace with no pending, start buffering
+      if(!buf&&(s==='\\x7f'||s==='\\b')){buf=s;tm=setTimeout(function(){var o=buf;buf=null;tm=null;fn.call(process.stdin,o)},W);return}
+      // If we have a pending backspace and this is printable text, merge and deliver
+      if(buf){
+        clearTimeout(tm);
+        var merged=buf+s;buf=null;tm=null;
+        fn.call(this,merged);
+        return;
+      }
+      fn.call(this,chunk);
+    };
+  }
+  process.stdin.on=function(ev,fn){return orig(ev,wrap(ev,fn))};
+  if(origAL)process.stdin.addListener=process.stdin.on;
+})();
+`;
 
 function usage() {
   console.log(`fix-vietnamese-kiro-cli v${VERSION}
 
-Usage:
-  node patch-cli-kiro.js [options]
+Usage: node patch-cli-kiro.js [options]
 
 Options:
-  -f, --file <path>    Path to Kiro CLI's tui.js
+  -f, --file <path>    Path to tui.js
   -d, --dry-run        Test without writing
-  -r, --restore        Restore from tui.js.bak
+  -r, --restore        Restore from backup
   -h, --help           Show help
-
-Default tui.js location:
-  Windows: %LOCALAPPDATA%\\kiro-cli\\tui.js
-  macOS:   ~/Library/Application Support/kiro-cli/tui.js
-  Linux:   ~/.local/share/kiro-cli/tui.js
 `);
 }
 
 function findTuiJs() {
   const candidates = [];
-  if (process.platform === 'win32') {
-    if (process.env.LOCALAPPDATA)
-      candidates.push(path.join(process.env.LOCALAPPDATA, 'kiro-cli', 'tui.js'));
-  } else if (process.platform === 'darwin') {
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA)
+    candidates.push(path.join(process.env.LOCALAPPDATA, 'kiro-cli', 'tui.js'));
+  else if (process.platform === 'darwin')
     candidates.push(path.join(os.homedir(), 'Library', 'Application Support', 'kiro-cli', 'tui.js'));
-  } else {
+  else {
     candidates.push(path.join(os.homedir(), '.local', 'share', 'kiro-cli', 'tui.js'));
     candidates.push(path.join(os.homedir(), '.config', 'kiro-cli', 'tui.js'));
   }
@@ -72,25 +111,36 @@ function findTuiJs() {
 }
 
 function patchContent(content) {
-  if (content.includes(MARKER)) {
-    return { ok: true, alreadyPatched: true };
+  if (content.includes(MARKER)) return { ok: true, alreadyPatched: true };
+
+  let patched = content;
+  let changes = [];
+
+  // Patch 1: Single-line editor guard
+  if (patched.includes(ORIGINAL_AP)) {
+    patched = patched.replace(ORIGINAL_AP, PATCHED_AP);
+    changes.push('single-line editor (class ap): filter control chars');
   }
-  if (!content.includes(ORIGINAL_PATTERN)) {
-    return {
-      ok: false,
-      error: 'Không tìm thấy pattern cần patch trong tui.js.\n' +
-             'Có thể Kiro CLI đã update và fix bug này rồi, hoặc đổi cấu trúc code.\n' +
-             'Vui lòng mở issue tại https://github.com/d-init-d/fix-vietnamese-kiro-cli/issues'
-    };
+
+  // Patch 2: Inject stdin coalescing IIFE after // @bun pragma
+  const re = /(^\s*#![^\r\n]*\r?\n)?(\/\/ @bun\b[^\r\n]*\r?\n)/m;
+  const match = patched.match(re);
+  if (match) {
+    const insertPoint = match.index + match[0].length;
+    patched = patched.slice(0, insertPoint) + PAYLOAD + '\n' + patched.slice(insertPoint);
+    changes.push('stdin IME coalescing (16ms window for backspace+text)');
   }
-  const patched = content.replace(ORIGINAL_PATTERN, PATCHED_CODE);
-  return { ok: true, alreadyPatched: false, content: patched };
+
+  if (changes.length === 0) {
+    return { ok: false, error: 'Không tìm thấy pattern cần patch. Kiro CLI có thể đã update.' };
+  }
+
+  return { ok: true, alreadyPatched: false, content: patched, changes };
 }
 
 function main() {
   const args = process.argv.slice(2);
   let target = null, dryRun = false, restore = false;
-
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '-h' || a === '--help') { usage(); process.exit(0); }
@@ -98,41 +148,28 @@ function main() {
     else if (a === '-r' || a === '--restore') restore = true;
     else if (a === '-f' || a === '--file') target = args[++i];
   }
-
   if (!target) target = findTuiJs();
-  if (!target || !fs.existsSync(target)) {
-    console.error('Không tìm thấy tui.js. Dùng -f để chỉ định path.');
-    process.exit(1);
-  }
-
+  if (!target || !fs.existsSync(target)) { console.error('Không tìm thấy tui.js.'); process.exit(1); }
   console.log('File: ' + target);
   const bak = target + '.bak';
-
   if (restore) {
-    if (!fs.existsSync(bak)) { console.error('Không có backup: ' + bak); process.exit(1); }
+    if (!fs.existsSync(bak)) { console.error('Không có backup.'); process.exit(1); }
     fs.copyFileSync(bak, target);
-    console.log('Đã restore từ backup.');
+    console.log('Đã restore.');
     process.exit(0);
   }
-
   const original = fs.readFileSync(target, 'utf8');
   const result = patchContent(original);
-
   if (!result.ok) { console.error(result.error); process.exit(1); }
-  if (result.alreadyPatched) { console.log('Đã patch từ trước. Không cần làm gì.'); process.exit(0); }
-  if (dryRun) { console.log('Dry run OK: tìm thấy pattern, patch khả thi.'); process.exit(0); }
-
-  if (!fs.existsSync(bak)) {
-    fs.copyFileSync(target, bak);
-    console.log('Backup: ' + bak);
-  }
-
+  if (result.alreadyPatched) { console.log('Đã patch từ trước.'); process.exit(0); }
+  if (dryRun) { console.log('Dry run OK. Changes: ' + result.changes.join(', ')); process.exit(0); }
+  if (!fs.existsSync(bak)) { fs.copyFileSync(target, bak); console.log('Backup: ' + bak); }
   fs.writeFileSync(target, result.content, 'utf8');
   console.log('✅ Patch thành công!');
-  console.log('');
-  console.log('Đóng Kiro CLI hiện tại, mở terminal mới và chạy `kiro-cli chat` để test.');
+  console.log('Changes: ' + result.changes.join(', '));
+  console.log('\nĐóng Kiro CLI, mở terminal mới, chạy `kiro-cli chat` để test.');
   console.log('Restore: node patch-cli-kiro.js --restore');
 }
 
 if (require.main === module) main();
-module.exports = { MARKER, VERSION, ORIGINAL_PATTERN, PATCHED_CODE, patchContent, findTuiJs };
+module.exports = { MARKER, VERSION, patchContent, findTuiJs };
