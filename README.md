@@ -1,14 +1,21 @@
-# 🇻🇳 Fix Vietnamese IME for Kiro CLI
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Kiro CLI](https://img.shields.io/badge/Kiro_CLI-2.3.0-blue.svg)](https://kiro.dev)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
-
-> Patch fix lỗi mất dấu / mất chữ khi gõ tiếng Việt trong Kiro CLI (TUI mode) với Unikey, EVKey, OpenKey.
+<p align="center">
+  <h1 align="center">🇻🇳 fix-vietnamese-kiro-cli</h1>
+  <p align="center">
+    <strong>Patch lỗi gõ tiếng Việt trong Kiro CLI</strong>
+  </p>
+  <p align="center">
+    <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+    <a href="https://github.com/d-init-d/fix-vietnamese-kiro-cli/releases"><img src="https://img.shields.io/github/v/release/d-init-d/fix-vietnamese-kiro-cli?color=green" alt="Release"></a>
+    <a href="https://kiro.dev"><img src="https://img.shields.io/badge/Kiro_CLI-v2.3+-blue.svg" alt="Kiro CLI"></a>
+    <img src="https://img.shields.io/badge/Platform-Windows%20│%20macOS%20│%20Linux-lightgrey.svg" alt="Platform">
+  </p>
+</p>
 
 ---
 
-## ⚡ Quick Start
+Khi gõ tiếng Việt (Unikey, EVKey, OpenKey) trong Kiro CLI TUI mode, chữ bị mất dấu hoặc mất ký tự do race condition trong input pipeline. Tool này patch trực tiếp vào `tui.js` để fix.
+
+## Cài đặt & sử dụng
 
 ```bash
 git clone https://github.com/d-init-d/fix-vietnamese-kiro-cli.git
@@ -16,194 +23,89 @@ cd fix-vietnamese-kiro-cli
 node patch-cli-kiro.js
 ```
 
-Sau đó **đóng Kiro CLI** và mở lại terminal mới → gõ tiếng Việt bình thường.
+Đóng Kiro CLI → mở terminal mới → gõ tiếng Việt bình thường. ✅
+
+> **Cách khác:** `npx github:d-init-d/fix-vietnamese-kiro-cli`
 
 ---
 
-## 🐛 Vấn đề
+## Vấn đề
 
-Khi gõ tiếng Việt trong Kiro CLI TUI mode (giao diện mặc định), các bộ gõ như Unikey/EVKey gửi chuỗi **backspace + text thay thế** để đặt dấu. Ví dụ gõ "chào" bằng Telex:
+Bộ gõ tiếng Việt hoạt động bằng cách gửi **backspace + text thay thế** cực nhanh (~5-20ms). Kiro CLI TUI (React/Ink) xử lý từng event async riêng lẻ → race condition:
 
 ```
-Gõ: c → h → a → o → f (dấu huyền)
-IME gửi: \x7F\x7F (xóa "ao") → "ào" (thay thế có dấu)
+Gõ "chào" (Telex): c → h → a → o → f
+IME gửi: \x7F\x7F (xóa "ao") + "ào" (thay thế)
+                    ↑ async gap ở đây → mất text
 ```
 
-Kiro CLI xử lý từng event riêng lẻ với khoảng cách async giữa chúng, gây **race condition** khiến text thay thế bị mất:
-
-| Gõ | Mong đợi | Thực tế (chưa patch) |
-|----|----------|---------------------|
+| Input | Mong đợi | Không patch |
+|-------|----------|-------------|
 | chào bạn | chào bạn | cha ba |
-| tôi dùng | tôi dùng | tôi du |
 | tiếng Việt | tiếng Việt | tieeng Viet |
 
----
-
-## 🔧 Cách hoạt động
-
-Patch inject một **stdin coalescing layer** vào đầu file `tui.js` của Kiro CLI:
+## Cách hoạt động
 
 ```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────┐
-│  Unikey/    │     │   Patch Layer    │     │  Kiro TUI   │
-│  EVKey      │────▶│  Buffer 30ms     │────▶│  Input      │
-│  (rapid     │     │  then flush      │     │  Handler    │
-│  events)    │     │  synchronously   │     │             │
-└─────────────┘     └──────────────────┘     └─────────────┘
+stdin events ──▶ Buffer (30ms) ──▶ Flush đồng bộ ──▶ Kiro TUI
+                 gom tất cả         split logic:        nhận atomic
+                 rapid events       BS│Ctrl│Text│ESC    composition
 ```
 
-1. **Buffer**: Tất cả stdin events được gom lại trong cửa sổ 30ms
-2. **Flush**: Sau 30ms idle, buffer được split thành logical events (backspace riêng, text riêng)
-3. **Deliver**: Các events được deliver **đồng bộ** (synchronous) — không có async gap giữa delete và insert
-4. **Result**: Editor xử lý toàn bộ IME composition trong 1 synchronous pass → không race condition
+1. **Buffer** — Gom stdin events trong cửa sổ 30ms (< 1 frame @60fps, không cảm nhận được)
+2. **Split** — Tách buffer thành: backspace, control chars (Enter/Tab), ESC sequences, printable text
+3. **Flush** — Deliver tất cả **đồng bộ** trong 1 pass → không race condition
 
----
-
-## 📦 Cài đặt
-
-### Yêu cầu
-
-- [Node.js](https://nodejs.org/) >= 14
-- Kiro CLI đã cài đặt
-
-### Cách 1: Clone repo
-
-```bash
-git clone https://github.com/d-init-d/fix-vietnamese-kiro-cli.git
-cd fix-vietnamese-kiro-cli
-node patch-cli-kiro.js
-```
-
-### Cách 2: Tải file và chạy
-
-```bash
-curl -O https://raw.githubusercontent.com/d-init-d/fix-vietnamese-kiro-cli/main/patch-cli-kiro.js
-node patch-cli-kiro.js
-```
-
-### Cách 3: npx (không cần clone)
-
-```bash
-npx github:d-init-d/fix-vietnamese-kiro-cli
-```
-
----
-
-## 🛠️ Sử dụng
+## CLI
 
 | Lệnh | Mô tả |
 |-------|--------|
 | `node patch-cli-kiro.js` | Apply patch |
-| `node patch-cli-kiro.js --dry-run` | Kiểm tra có patch được không (không ghi file) |
-| `node patch-cli-kiro.js --restore` | Khôi phục bản gốc từ backup |
-| `node patch-cli-kiro.js -f <path>` | Chỉ định path tới `tui.js` thủ công |
+| `node patch-cli-kiro.js --dry-run` | Test không ghi file |
+| `node patch-cli-kiro.js --restore` | Khôi phục bản gốc |
+| `node patch-cli-kiro.js -f <path>` | Chỉ định path thủ công |
 
-### Sau khi patch
+## Sau khi Kiro CLI update
 
-1. **Đóng tất cả session Kiro CLI đang chạy**
-2. Mở terminal mới
-3. Chạy `kiro-cli chat` (hoặc `kiro-cli`)
-4. Gõ tiếng Việt bình thường ✅
-
----
-
-## 🔄 Sau khi Kiro CLI cập nhật
-
-Mỗi lần Kiro CLI tự update, file `tui.js` sẽ bị ghi đè. Chỉ cần chạy lại:
+Mỗi lần Kiro CLI tự update, `tui.js` bị ghi đè. Chạy lại:
 
 ```bash
-cd fix-vietnamese-kiro-cli
-git pull          # Lấy patch mới nhất (nếu có)
-node patch-cli-kiro.js
+cd fix-vietnamese-kiro-cli && git pull && node patch-cli-kiro.js
 ```
 
-Script là **idempotent** — chạy nhiều lần không gây hại.
+Script idempotent — chạy nhiều lần không hại.
 
----
-
-## 🖥️ Vị trí `tui.js` theo OS
-
-Script tự động tìm `tui.js` ở đường dẫn mặc định:
+## Vị trí `tui.js`
 
 | OS | Path |
 |----|------|
-| **Windows** | `%LOCALAPPDATA%\kiro-cli\tui.js` |
-| **macOS** | `~/Library/Application Support/kiro-cli/tui.js` |
-| **Linux** | `~/.local/share/kiro-cli/tui.js` |
+| Windows | `%LOCALAPPDATA%\kiro-cli\tui.js` |
+| macOS | `~/Library/Application Support/kiro-cli/tui.js` |
+| Linux | `~/.local/share/kiro-cli/tui.js` |
 
-Nếu Kiro CLI cài ở chỗ khác, dùng `-f`:
+## Tương thích
 
-```bash
-node patch-cli-kiro.js -f "/path/to/tui.js"
-```
+| | Đã test |
+|--|---------|
+| Kiro CLI | v2.3.0+ |
+| OS | Windows 10/11, macOS, Linux |
+| Bộ gõ | Unikey 4.x, EVKey 4.x, OpenKey 1.x |
+| Kiểu gõ | Telex, VNI |
+| Node.js | ≥ 14 |
 
----
+## Troubleshooting
 
-## ✅ Tương thích
+| Vấn đề | Giải pháp |
+|---------|-----------|
+| "Pattern not found" | Kiro CLI đã update cấu trúc — [mở issue](https://github.com/d-init-d/fix-vietnamese-kiro-cli/issues) |
+| Crash sau patch | `node patch-cli-kiro.js --restore` |
+| Delay nhẹ (~30ms) | Trade-off cần thiết. Giảm: đổi `var W=30` → `var W=20` trong script |
+| Vẫn lỗi một số từ | Unikey: bật "Bỏ dấu kiểu mới", tắt "Sửa lỗi chính tả" |
 
-| Thành phần | Đã test |
-|-----------|---------|
-| **Kiro CLI** | v2.3.0 |
-| **OS** | Windows 10/11, macOS, Linux |
-| **Bộ gõ** | Unikey 4.x, EVKey 4.x, OpenKey 1.x |
-| **Kiểu gõ** | Telex, VNI |
-| **Node.js** | >= 14 (chỉ cần để chạy script) |
+## Credits
 
----
+- [fix-vietnamese-claude-code](https://github.com/0x0a0d/fix-vietnamese-claude-code) by **0x0a0d** — kỹ thuật investigation ban đầu
 
-## ❓ Troubleshooting
-
-### Script báo "Pattern not found"
-
-Kiro CLI có thể đã update và đổi cấu trúc bundle, hoặc đã fix bug này upstream. Mở [issue](https://github.com/d-init-d/fix-vietnamese-kiro-cli/issues) kèm output của `kiro-cli --version`.
-
-### Sau khi patch, Kiro CLI bị crash
-
-```bash
-node patch-cli-kiro.js --restore
-```
-
-### Gõ hơi chậm hơn bình thường (~30ms delay)
-
-Đây là trade-off cần thiết. 30ms < 1 frame ở 60fps, hầu hết người dùng không cảm nhận được. Nếu cần giảm delay, mở `patch-cli-kiro.js` và đổi `var W=30` thành `var W=20`.
-
-### Vẫn bị lỗi với một số từ
-
-Thử cấu hình bộ gõ:
-- **Unikey**: Bật "Bỏ dấu kiểu mới", tắt "Sửa lỗi chính tả"
-- **EVKey**: Bật "Bỏ dấu kiểu mới", tắt "Kiểm tra chính tả"
-
----
-
-## 🔬 Chi tiết kỹ thuật
-
-### Root Cause
-
-Kiro CLI TUI dùng Bun-compiled React (Ink) bundle. Input pipeline:
-
-```
-process.stdin (raw mode) → addInputListener → handleInput → editor state
-```
-
-Vietnamese IME gửi rapid events (`\x7F` + text) arrive qua **separate** `data` events trên stdin. Giữa 2 events, React có thể schedule re-render, gây stale state khi event thứ 2 arrive.
-
-### Patch Strategy
-
-1. **Stdin coalescing** (IIFE inject sau `// @bun` pragma): Hook `process.stdin.on('data')` để buffer events trong 30ms window, sau đó flush synchronously
-2. **Single-line editor guard** (string replace): Thay logic "reject all if any control char" bằng "filter control chars, insert printable portion"
-
-### File được modify
-
-- `%LOCALAPPDATA%\kiro-cli\tui.js` (backup tự động tại `tui.js.bak`)
-
----
-
-## 🙏 Credits
-
-- [fix-vietnamese-claude-code](https://github.com/0x0a0d/fix-vietnamese-claude-code) by **0x0a0d** — nguồn cảm hứng và kỹ thuật investigation ban đầu
-
----
-
-## 📄 License
+## License
 
 [MIT](LICENSE) © d-init-d

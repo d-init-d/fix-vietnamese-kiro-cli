@@ -1,6 +1,6 @@
 {
   "name": "fix-vietnamese-kiro-cli",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "Fix Vietnamese IME (Unikey/EVKey/OpenKey) typing issues in Kiro CLI TUI mode",
   "main": "patch-cli-kiro.js",
   "bin": {

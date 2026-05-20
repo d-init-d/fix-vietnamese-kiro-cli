@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * fix-vietnamese-kiro-cli v4.0.0
+ * fix-vietnamese-kiro-cli v4.1.0
  *
  * Vietnamese IME (Unikey/EVKey/OpenKey) sends rapid sequences of keystrokes to
  * compose diacritics. For example, typing "chào" with Telex:
@@ -27,7 +27,7 @@ const path = require('path');
 const os = require('os');
 
 const MARKER = '/* _d_init_d_vn_ime_fix_v4_ */';
-const VERSION = '4.0.0';
+const VERSION = '4.1.0';
 
 const ORIGINAL_AP = 'if(![...e].some((i)=>{let a=i.charCodeAt(0);return a<32||a===127||a>=128&&a<=159}))this.insertCharacter(e)';
 const PATCHED_AP = `${MARKER}(()=>{let _f=[...e].filter((i)=>{let a=i.charCodeAt(0);return!(a<32||a===127||a>=128&&a<=159)}).join("");if(_f.length>0)this.insertCharacter(_f)})()`;
@@ -51,6 +51,7 @@ const PAYLOAD = `${MARKER}
       // Deliver them as separate calls but synchronously (no async gap).
       var i=0,len=merged.length;
       while(i<len){
+        var cc=merged.charCodeAt(i);
         if(merged[i]==='\\x7f'||merged[i]==='\\b'){
           fn.call(process.stdin,merged[i]);
           i++;
@@ -64,6 +65,10 @@ const PAYLOAD = `${MARKER}
           }else if(j<len){j++}
           fn.call(process.stdin,merged.slice(i,j));
           i=j;
+        } else if(cc<32){
+          // Control chars (Enter=13, Tab=9, etc.) - deliver as-is
+          fn.call(process.stdin,merged[i]);
+          i++;
         } else {
           // Printable text - collect contiguous printable chars
           var j=i;
